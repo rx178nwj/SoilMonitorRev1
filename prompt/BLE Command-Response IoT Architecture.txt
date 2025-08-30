@@ -1,0 +1,209 @@
+ESP32-C3 BLE植物監視システム Command-Response機能統合プロンプト
+あなたはプロのIoTプログラマーです。
+ESP32とBLEに精通しており、標準的なCommand-Responseパターンの実装経験が豊富です。既存のコードへの影響を最小限に抑えながら、拡張性と保守性を重視した実装を行ってください。
+作業概要
+既存のESP32-C3 BLE植物監視システムのble_manager.cに、標準的なBLE Command-Responseシステムと指定時間データ取得機能を統合してください。
+追加する機能概要
+1. 新しいBLE Characteristic（3つ）
+
+Command Characteristic (Write専用)
+
+UUID: 6a3b2c1d-4e5f-6a7b-8c9d-e0f123456791
+プロパティ: BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP
+機能: クライアントからコマンドを受信
+
+
+Response Characteristic (Read/Notify)
+
+UUID: 6a3b2c1d-4e5f-6a7b-8c9d-e0f123456792
+プロパティ: BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY
+機能: コマンドの実行結果をクライアントに通知
+
+
+Data Transfer Characteristic (Read/Write/Notify)
+
+UUID: 6a3b2c1d-4e5f-6a7b-8c9d-e0f123456793
+プロパティ: BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY
+機能: 大きなデータ（履歴データ、設定ファイルなど）の転送
+
+
+
+2. データ構造定義
+c// コマンドパケット
+typedef struct __attribute__((packed)) {
+    uint8_t command_id;      // コマンド識別子
+    uint8_t sequence_num;    // シーケンス番号
+    uint16_t data_length;    // データ長
+    uint8_t data[];          // コマンドデータ
+} ble_command_packet_t;
+
+// レスポンスパケット
+typedef struct __attribute__((packed)) {
+    uint8_t response_id;     // レスポンス識別子
+    uint8_t status_code;     // ステータスコード
+    uint8_t sequence_num;    // 対応するシーケンス番号
+    uint16_t data_length;    // レスポンスデータ長
+    uint8_t data[];          // レスポンスデータ
+} ble_response_packet_t;
+
+// 時間指定リクエスト用構造体
+typedef struct __attribute__((packed)) {
+    struct tm requested_time; // 要求する時間
+} time_data_request_t;
+
+// 時間指定データ取得レスポンス用構造体
+typedef struct __attribute__((packed)) {
+    struct tm actual_time;    // 実際に見つかったデータの時間
+    float temperature;        // 気温
+    float humidity;          // 湿度
+    float lux;              // 照度
+    float soil_moisture;    // 土壌水分
+} time_data_response_t;
+
+// デバイス情報構造体
+typedef struct __attribute__((packed)) {
+    char device_name[32];
+    char firmware_version[16];
+    char hardware_version[16];
+    uint32_t uptime_seconds;
+    uint32_t total_sensor_readings;
+} device_info_t;
+3. 実装するコマンド
+ctypedef enum {
+    CMD_GET_SENSOR_DATA = 0x01,     // 最新センサーデータ取得
+    CMD_GET_SYSTEM_STATUS = 0x02,   // システム状態取得（メモリ使用量、稼働時間等）
+    CMD_SET_THRESHOLD = 0x03,       // 土壌水分しきい値設定
+    CMD_GET_HISTORY_DATA = 0x04,    // 履歴データ取得
+    CMD_SYSTEM_RESET = 0x05,        // システムリセット
+    CMD_GET_DEVICE_INFO = 0x06,     // デバイス情報取得（名前、FWバージョン等）
+    CMD_SET_TIME = 0x07,            // 時刻設定
+    CMD_GET_CONFIG = 0x08,          // 設定取得
+    CMD_SET_CONFIG = 0x09,          // 設定変更
+    CMD_GET_TIME_DATA = 0x0A,       // 指定時間データ取得 ★重要★
+} ble_command_id_t;
+4. レスポンスステータス
+ctypedef enum {
+    RESP_STATUS_SUCCESS = 0x00,
+    RESP_STATUS_ERROR = 0x01,
+    RESP_STATUS_INVALID_COMMAND = 0x02,
+    RESP_STATUS_INVALID_PARAMETER = 0x03,
+    RESP_STATUS_BUSY = 0x04,
+    RESP_STATUS_NOT_SUPPORTED = 0x05,
+} ble_response_status_t;
+実装要求
+1. GATT Service定義の拡張
+既存のサービスに3つの新しいcharacteristicを追加し、gatt_svr_svcs[]配列を更新してください。
+2. Access Callback関数群
+以下のCallback関数を実装：
+
+gatt_svr_access_command_cb(): Command Characteristic用
+gatt_svr_access_response_cb(): Response Characteristic用
+gatt_svr_access_data_transfer_cb(): Data Transfer Characteristic用
+
+3. コマンド処理エンジン
+以下の関数群を実装：
+c// メインコマンド処理
+static esp_err_t process_ble_command(const ble_command_packet_t *cmd_packet, 
+                                    uint8_t *response_buffer, size_t *response_length);
+
+// 各コマンド処理関数
+static esp_err_t handle_get_sensor_data(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
+static esp_err_t handle_get_system_status(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
+static esp_err_t handle_set_threshold(const uint8_t *data, uint16_t data_length, uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
+static esp_err_t handle_get_device_info(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
+
+// ★重要★ 指定時間データ取得関数
+static esp_err_t handle_get_time_data(const uint8_t *data, uint16_t data_length, 
+                                     uint8_t sequence_num, uint8_t *response_buffer, 
+                                     size_t *response_length);
+4. 指定時間データ検索機能
+検索ロジック:
+
+分単位での時間判定: 秒は無視し、年月日時分が一致するデータを検索
+検索順序:
+
+まずdata_bufferの1分データ（過去24時間分）から検索
+見つからない場合はg_soil_fifoから検索
+
+
+レスポンス:
+
+データ発見時: RESP_STATUS_SUCCESS + time_data_response_t
+データなし時: RESP_STATUS_ERROR + データ長0
+
+
+
+必要な補助関数:
+c// 分単位時間比較（秒は無視）
+static bool compare_time_minute(const struct tm *time1, const struct tm *time2);
+
+// 指定時間データ検索
+static esp_err_t find_data_by_time(const struct tm *target_time, time_data_response_t *result);
+
+// レスポンス通知送信
+static esp_err_t send_response_notification(const uint8_t *response_data, size_t response_length);
+5. エラーハンドリング
+
+データ長チェック、不正コマンド対応
+競合状態の回避（g_command_processingフラグ）
+メモリ不足、通信エラーの適切な処理
+
+6. 状態管理変数
+以下のグローバル変数を追加：
+cstatic uint16_t g_command_handle = 0;
+static uint16_t g_response_handle = 0;
+static uint16_t g_data_transfer_handle = 0;
+static uint8_t g_last_sequence_num = 0;
+static bool g_command_processing = false;
+static uint32_t g_system_uptime = 0;
+static uint32_t g_total_sensor_readings = 0;
+7. BLEイベント処理の拡張
+gap_event_handler()のBLE_GAP_EVENT_SUBSCRIBEケースを拡張し、新しいcharacteristicの購読状態を管理してください。
+8. 依存ファイルの拡張
+soil_data_fifo.h/.cに以下の関数を追加：
+cesp_err_t soil_fifo_peek(const soil_fifo_t *fifo, size_t index, soil_data_t *data);
+実装ガイドライン
+コード品質要求
+
+安全性: 全てのポインタをnullチェック、バッファオーバーフローを防止
+効率性: 不要なメモリコピーを避け、計算量を最小化
+可読性: 関数名、変数名は自己説明的に、適切なコメントを付与
+拡張性: 新しいコマンドの追加が容易な構造
+
+ログ出力規則
+
+INFO: 正常な処理フロー（コマンド受信、処理完了）
+WARN: 予期しないが処理可能な状況（データなし等）
+ERROR: エラー状況（不正なデータ、処理失敗等）
+
+設計方針
+
+既存機能への影響を最小限に抑制
+拡張性を考慮した構造（新コマンド追加が容易）
+エラーハンドリングの充実
+メモリ効率的な実装
+BLE標準的な実装パターンに準拠
+分単位での正確な時間検索
+
+初期化ログの拡張
+app_main()の最後に以下のログを追加：
+cESP_LOGI(TAG, "✅ BLE Command-Response System initialized");
+ESP_LOGI(TAG, "📡 Available commands:");
+ESP_LOGI(TAG, "  - 0x01: Get Sensor Data");
+ESP_LOGI(TAG, "  - 0x02: Get System Status");
+ESP_LOGI(TAG, "  - 0x03: Set Threshold");
+ESP_LOGI(TAG, "  - 0x06: Get Device Info");
+ESP_LOGI(TAG, "  - 0x0A: Get Time-Specific Data");
+ESP_LOGI(TAG, "📡 BLE Characteristics:");
+ESP_LOGI(TAG, "  - Command: Write commands to device");
+ESP_LOGI(TAG, "  - Response: Read/Notify for command responses");
+ESP_LOGI(TAG, "  - Data Transfer: Read/Write/Notify for large data");
+使用例
+クライアントが「2024年12月15日 14:30」のデータを要求する場合:
+
+time_data_request_t構造体に時間を設定
+CMD_GET_TIME_DATAコマンドで送信
+システムは分単位で一致するデータを検索
+見つかればtime_data_response_tで応答、なければエラー応答
+
+このCommand-Responseシステムにより、BLE経由でのリアルタイム制御・監視・履歴データ検索が可能になります。既存のセンサーデータ取得機能は維持しつつ、プロのIoTシステムとして高度な制御機能を提供してください。
