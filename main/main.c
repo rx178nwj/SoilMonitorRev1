@@ -1,16 +1,6 @@
 /**
  * @file main.c
  * @brief ESP-IDF v5.5 NimBLE Power-Saving Peripheral for Sensor Data
- *
- * This application demonstrates a BLE peripheral on ESP32-C3 that:
- * 1. Uses the modern NimBLE API for ESP-IDF v5.5.
- * 2. Implements a custom GATT service with a sensor data characteristic (Notify)
- * and a threshold setting characteristic (Read/Write).
- * 3. Starts a timer on boot that runs independently of BLE connection status.
- * 4. Sends a sensor data notification every 10 seconds ONLY to a subscribed client.
- * 5. Utilizes automatic light sleep with BLE modem sleep to maintain the
- * connection while minimizing power consumption.
- * 6. Blinks an LED every 10 seconds to indicate timer activity.
  */
 
 #include <stdio.h>
@@ -43,38 +33,30 @@
 #include "esp_adc/adc_cali_scheme.h"
 
 // 分離されたモジュール
-#include "components/ble/ble_manager.h"          // NimBLEの管理
-#include "components/sensors/sht30_sensor.h"               // 温湿度センサー
-#include "components/sensors/tsl2591_sensor.h"             // 照度センサー
-#include "wifi_manager.h"               // WiFi管理
-#include "time_sync_manager.h"          // 時刻同期管理
-#include "components/sensors/moisture_sensor.h"            // 水分センサー
-#include "components/actuators/led_control.h"                // LED制御
-#include "common_types.h"               // 共通型定義
-#include "components/plant_logic/plant_manager.h"             // 植物管理
-#include "nvs_config.h"                // NVS設定
-#include "components/plant_logic/data_buffer.h"               // データバッファ
+#include "components/ble/ble_manager.h"
+#include "components/sensors/sht30_sensor.h"
+#include "components/sensors/tsl2591_sensor.h"
+#include "wifi_manager.h"
+#include "time_sync_manager.h"
+#include "components/sensors/moisture_sensor.h"
+#include "components/actuators/led_control.h"
+#include "common_types.h"
+#include "components/plant_logic/plant_manager.h"
+#include "nvs_config.h"
+#include "components/plant_logic/data_buffer.h"
 
 static const char *TAG = "PLANTER_MONITOR";
 
-// NVSキー定義
-#define NVS_NAMESPACE "plant_config"
-#define NVS_KEY_PROFILE "profile"
-
-/* --- Global Variables --- */
-// グローバル変数
 // タスクハンドル
-static TaskHandle_t g_sensor_task_handle = NULL; // センサーデータ取得タスクのハンドル
-static TaskHandle_t g_analysis_task_handle = NULL; // 分析タスクのハンドル
-
+static TaskHandle_t g_sensor_task_handle = NULL;
+static TaskHandle_t g_analysis_task_handle = NULL;
 
 static TimerHandle_t g_notify_timer;
 
 static void notify_timer_callback(TimerHandle_t xTimer);
 
 // I2C初期化
-static esp_err_t init_i2c(void)
-{
+static esp_err_t init_i2c(void) {
     i2c_config_t i2c_config = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_SDA_PIN,
@@ -84,10 +66,8 @@ static esp_err_t init_i2c(void)
         .master.clk_speed = 100000, // 100kHz
         .clk_flags = 0,
     };
-
     esp_err_t ret = i2c_param_config(I2C_NUM_0, &i2c_config);
     if (ret != ESP_OK) return ret;
-
     ret = i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "I2C initialized successfully");
@@ -95,235 +75,86 @@ static esp_err_t init_i2c(void)
     return ret;
 }
 
-
-
 // 全センサーデータ読み取り
-static void read_all_sensors(soil_data_t *data)
-{
-
+static void read_all_sensors(soil_data_t *data) {
     ESP_LOGI(TAG, "📊 Reading all sensors...");
-
-    // 測定時刻を記録
-    ESP_LOGI(TAG, "⏰ Getting current time...");
     struct tm datetime;
     time_sync_manager_get_current_time(&datetime);
-    data->datetime = datetime; // soil_data_t has datetime field
+    data->datetime = datetime;
 
-    // 水分センサー
-    ESP_LOGI(TAG, "🌱 Reading moisture sensor...");
     data->soil_moisture = (float)read_moisture_sensor();
 
-    // SHT30温湿度センサー（分離されたモジュールを使用）
-    ESP_LOGI(TAG, "🌡️ Reading SHT30 sensor...");
     sht30_data_t sht30;
-    esp_err_t ret = sht30_read_data(&sht30);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "SHT30読み取り失敗: %s", esp_err_to_name(ret));
-    } else{
-        ESP_LOGI(TAG, "SHT30温度: %.2f °C, 湿度: %.2f %%",
-                 sht30.temperature, sht30.humidity);
+    if (sht30_read_data(&sht30) == ESP_OK) {
         data->temperature = sht30.temperature;
         data->humidity = sht30.humidity;
     }
 
-    // TSL2591照度センサー（分離されたモジュールを使用）
-    ESP_LOGI(TAG, "💡 Reading TSL2591 sensor...");
     tsl2591_data_t tsl2591;
-    ret = tsl2591_read_data(&tsl2591);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "TSL2591読み取り失敗: %s", esp_err_to_name(ret));
-    } else{
-        ESP_LOGI(TAG, "TSL2591照度: %.2f Lux", tsl2591.light_lux);
+    if (tsl2591_read_data(&tsl2591) == ESP_OK) {
         data->lux = tsl2591.light_lux;
     }
-
 }
 
 /* --- GPIO Initialization --- */
-void init_gpio(void)
-{
+void init_gpio(void) {
     gpio_reset_pin(RED_LED_GPIO_PIN);
     gpio_set_direction(RED_LED_GPIO_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(RED_LED_GPIO_PIN, 0);
-    ESP_LOGI(TAG, "GPIO%d initialized for RED LED control.", RED_LED_GPIO_PIN);
 
     gpio_reset_pin(BLU_LED_GPIO_PIN);
     gpio_set_direction(BLU_LED_GPIO_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(BLU_LED_GPIO_PIN, 0);
-    ESP_LOGI(TAG, "GPIO%d initialized for BLUE LED control.", BLU_LED_GPIO_PIN);
 }
 
 // センサー読み取り専用タスク
-static void sensor_read_task(void* pvParameters)
-{
+static void sensor_read_task(void* pvParameters) {
     soil_data_t data;
-
     while (1) {
-        // タイマーからの通知を待機
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        ESP_LOGI(TAG, "📊 Reading all sensors...");
-
-        /* [修正箇所] LEDを点灯させ、タイマーが作動したことを示す */
         gpio_set_level(RED_LED_GPIO_PIN, 1);
-
-
         read_all_sensors(&data);
-
-        // センサーデータをデータバッファに保存
         plant_manager_process_sensor_data(&data);
-
-        ESP_LOGI(TAG, "Updating sensor data: Temp=%.2f, Hum=%.2f, Lux=%.2f, Soil=%.0f",
-                    data.temperature, data.humidity,
-                    data.lux, data.soil_moisture);
-
-        /* 1秒間の点灯制御 */
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Keep LED on for a short duration
-
-        /* [修正箇所] 処理完了後、すぐにLEDを消灯する */
+        vTaskDelay(pdMS_TO_TICKS(1000));
         gpio_set_level(RED_LED_GPIO_PIN, 0);
     }
 }
 
 /* --- Timer Callback for Notifications --- */
-static void notify_timer_callback(TimerHandle_t xTimer)
-{
-    ESP_LOGI(TAG, "Notify Timer Callback triggered");
-
-    // センサータスクに通知を送信（ブロッキングなし）
+static void notify_timer_callback(TimerHandle_t xTimer) {
     if (g_sensor_task_handle != NULL) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         vTaskNotifyGiveFromISR(g_sensor_task_handle, &xHigherPriorityTaskWoken);
         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
-
 }
 
-
-// WiFi状態変更コールバック
-static void wifi_status_callback(bool connected)
-{
-    if (connected) {
-        ESP_LOGI(TAG, "📶 WiFi接続確立 - 時刻同期を開始します");
-        time_sync_manager_start();
-    } else {
-        ESP_LOGW(TAG, "📶 WiFi接続切断");
-    }
+// WiFi/Timeコールバック
+static void wifi_status_callback(bool connected) {
+    if (connected) time_sync_manager_start();
 }
-
-// 時刻同期完了コールバック
-static void time_sync_callback(struct timeval *tv)
-{
+static void time_sync_callback(struct timeval *tv) {
     ESP_LOGI(TAG, "⏰ システム時刻が同期されました");
 }
 
-// ネットワーク状態確認
-static void check_network_status(void)
-{
-    // WiFi状態確認
-    wifi_manager_check_status();
-
-    // 時刻同期状態確認
-    time_sync_manager_check_status();
-}
-
 // ネットワーク初期化
-static void network_init(void)
-{
-    ESP_LOGI(TAG, "📶 ネットワーク初期化開始...");
-
-    // WiFi開始
-    esp_err_t ret = wifi_manager_start();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "WiFi start failed: %s", esp_err_to_name(ret));
-        return;
+static void network_init(void) {
+    wifi_manager_start();
+    if (wifi_manager_wait_for_connection(WIFI_CONNECT_TIMEOUT_SEC)) {
+        time_sync_manager_wait_for_sync(SNTP_SYNC_TIMEOUT_SEC);
     }
-
-    // WiFi接続を待機（30秒）
-    bool wifi_success = wifi_manager_wait_for_connection(WIFI_CONNECT_TIMEOUT_SEC);
-    if (wifi_success) {
-        ESP_LOGI(TAG, "✅ WiFi接続に成功しました");
-
-        // 時刻同期開始（WiFi接続成功時に自動的に開始される）
-        if (time_sync_manager_wait_for_sync(SNTP_SYNC_TIMEOUT_SEC)) {
-            ESP_LOGI(TAG, "✅ 時刻同期に成功しました");
-        } else {
-            ESP_LOGW(TAG, "⚠️  時刻同期に失敗 - ローカル時刻を使用");
-        }
-    } else {
-        ESP_LOGW(TAG, "⚠️  WiFi接続に失敗 - オフラインモードで動作");
-    }
-
-    ESP_LOGI(TAG, "✅ ネットワーク初期化完了");
 }
 
-// 初期に時間を取得する
-void initial_datetime(void)
-{
-    // 時間初期化
-    /* [修正箇所] 処理完了後、RED/BLU LEDを両方点灯する */
-    gpio_set_level(BLU_LED_GPIO_PIN, 1);
-    gpio_set_level(RED_LED_GPIO_PIN, 1);
-
-    // 時間を取得する
-    // ネットワーク初期化
-    network_init();
-
-    // 初期化後のネットワーク状態確認
-    check_network_status();
-
-    /* [修正箇所] 処理完了後、RED/BLU LEDを両方消灯する */
-    gpio_set_level(BLU_LED_GPIO_PIN, 0);
-    gpio_set_level(RED_LED_GPIO_PIN, 0);
-
-}
-
-/**
- * センサーデータと判断結果をログ出力
- */
+// センサーデータと判断結果をログ出力
 static void log_sensor_data_and_status(const soil_data_t *soil_data,
                                      const plant_status_result_t *status,
                                      int loop_count) {
-    // センサーデータを出力
     ESP_LOGI(TAG, "=== 植物状態判断結果 (Loop: %d) ===", loop_count);
     ESP_LOGI(TAG, "現在気温: %.1f℃, 湿度: %.1f%%, 照度: %.0flux, 土壌水分: %.0fmV",
              soil_data->temperature, soil_data->humidity,
              soil_data->lux, soil_data->soil_moisture);
-
-    // 判断結果を出力
-    ESP_LOGI(TAG, "土壌状態: %s",
-             plant_manager_get_soil_condition_string(status->soil_condition));
-}
-
-/**
- * 過去データサマリーをログ出力
- */
-static void log_recent_data_summary(void) {
-    ESP_LOGI(TAG, "=== 過去データサマリー ===");
-
-
-    // 過去7日間の日別サマリーを取得
-    daily_summary_data_t daily_summaries[7];
-    uint8_t summary_count = 0;
-
-    esp_err_t ret = data_buffer_get_recent_daily_summaries(7, daily_summaries, &summary_count);
-    if (ret == ESP_OK && summary_count > 0) {
-        ESP_LOGI(TAG, "過去%d日間の日別データ:", summary_count);
-        for (int i = 0; i < summary_count; i++) {
-            ESP_LOGI(TAG, "日%d (%04d-%02d-%02d): 気温%.1f-%.1f℃, 土壌%.0fmV (%d samples)",
-                     i+1,
-                     daily_summaries[i].date.tm_year + 1900,
-                     daily_summaries[i].date.tm_mon + 1,
-                     daily_summaries[i].date.tm_mday,
-                     daily_summaries[i].min_temperature,
-                     daily_summaries[i].max_temperature,
-                     daily_summaries[i].avg_soil_moisture,
-                     daily_summaries[i].valid_samples);
-        }
-    } else {
-        ESP_LOGI(TAG, "日別データが不足しています");
-    }
-
+    ESP_LOGI(TAG, "状態: %s",
+             plant_manager_get_plant_condition_string(status->plant_condition));
 }
 
 /**
@@ -331,22 +162,14 @@ static void log_recent_data_summary(void) {
  */
 static void status_analysis_task(void *pvParameters) {
     int analysis_count = 0;
-
-    ESP_LOGI(TAG, "状態分析タスク開始（10分間隔）");
-
-    // 初回は少し待機（センサーデータがある程度蓄積されるまで）
-    vTaskDelay(pdMS_TO_TICKS(120000)); // 2分待機
+    ESP_LOGI(TAG, "状態分析タスク開始（1分間隔）");
+    vTaskDelay(pdMS_TO_TICKS(10000)); // 10秒待機
 
     while (1) {
-        // 植物状態を判断
         plant_status_result_t status = plant_manager_determine_status();
-
-        // 最新のセンサーデータを取得
         minute_data_t latest_sensor;
-        esp_err_t ret = data_buffer_get_latest_minute_data(&latest_sensor);
 
-        if (ret == ESP_OK) {
-            // 結果をログ出力（sensor_data_t形式に変換）
+        if (data_buffer_get_latest_minute_data(&latest_sensor) == ESP_OK) {
             soil_data_t display_data = {
                 .datetime = latest_sensor.timestamp,
                 .temperature = latest_sensor.temperature,
@@ -354,52 +177,39 @@ static void status_analysis_task(void *pvParameters) {
                 .lux = latest_sensor.lux,
                 .soil_moisture = latest_sensor.soil_moisture
             };
-
             log_sensor_data_and_status(&display_data, &status, ++analysis_count);
         } else {
             ESP_LOGW(TAG, "最新センサーデータの取得に失敗");
         }
 
-        switch (status.soil_condition)
-        {
-        case SOIL_DRY:
-            // 乾燥時はオレンジLED点灯
-            ws2812_set_preset_color(WS2812_COLOR_ORANGE);
-            ESP_LOGW(TAG, "⚠️ 土壌が乾燥しています。");
-            break;
-        case SOIL_WET:
-            // 湿潤は緑LED点灯
-            ws2812_set_preset_color(WS2812_COLOR_GREEN);
-            ESP_LOGI(TAG, "💧 土壌が湿っています。水やり不要です。");
-            break;
-        case NEEDS_WATERING:
-            // 水やり必要は赤LED点灯
-            ws2812_set_preset_color(WS2812_COLOR_RED);
-            ESP_LOGW(TAG, "⚠️ 土壌が非常に乾燥しています。水やりが必要です！");
-            break;
-        case WATERING_COMPLETED:
-            // 灌水完了は青LED点灯
-            ws2812_set_preset_color(WS2812_COLOR_BLUE);
-            ESP_LOGI(TAG, "✅ 灌水が完了しました。");
-            break;
-        default:
-            // 不明は消灯
-            ws2812_set_preset_color(WS2812_COLOR_OFF);
-            ESP_LOGI(TAG, "土壌状態が不明です。");
-            break;
+        switch (status.plant_condition) {
+            case TEMP_TOO_HIGH:
+                ws2812_set_preset_color(WS2812_COLOR_RED);
+                ESP_LOGW(TAG, "🔥 高温限界です！");
+                break;
+            case TEMP_TOO_LOW:
+                ws2812_set_preset_color(WS2812_COLOR_BLUE);
+                ESP_LOGW(TAG, "🧊 低温限界です！");
+                break;
+            case NEEDS_WATERING:
+                ws2812_set_preset_color(WS2812_COLOR_YELLOW);
+                ESP_LOGW(TAG, "💧 灌水が必要です！");
+                break;
+            case SOIL_DRY:
+                ws2812_set_preset_color(WS2812_COLOR_ORANGE);
+                break;
+            case SOIL_WET:
+                ws2812_set_preset_color(WS2812_COLOR_GREEN);
+                break;
+            case WATERING_COMPLETED:
+                ws2812_set_preset_color(WS2812_COLOR_WHITE);
+                break;
+            default:
+                ws2812_set_preset_color(WS2812_COLOR_OFF);
+                break;
         }
 
-        // 10回ごとに詳細情報を表示
-        if (analysis_count % 10 == 0) {
-            log_recent_data_summary();
-            plant_manager_print_system_status();
-
-            // 古いデータのクリーンアップ
-            data_buffer_cleanup_old_data();
-        }
-
-        // 10分待機
-        vTaskDelay(pdMS_TO_TICKS(600000));
+        vTaskDelay(pdMS_TO_TICKS(60000)); // 1分待機
     }
 }
 
@@ -408,10 +218,7 @@ static void status_analysis_task(void *pvParameters) {
  */
 static void log_plant_profile(void) {
     const plant_profile_t *profile = plant_manager_get_profile();
-    if (profile == NULL) {
-        ESP_LOGE(TAG, "Failed to get plant profile");
-        return;
-    }
+    if (profile == NULL) return;
 
     ESP_LOGI(TAG, "=== 植物プロファイル情報 ===");
     ESP_LOGI(TAG, "植物名: %s", profile->plant_name);
@@ -419,16 +226,14 @@ static void log_plant_profile(void) {
              profile->soil_dry_threshold,
              profile->soil_wet_threshold,
              profile->soil_dry_days_for_watering);
+    ESP_LOGI(TAG, "気温限界: 高温>=%.1f℃, 低温<=%.1f℃",
+             profile->temp_high_limit,
+             profile->temp_low_limit);
 }
 
 // システム初期化
-static esp_err_t system_init(void)
-{
+static esp_err_t system_init(void) {
     esp_err_t ret;
-
-    ESP_LOGI(TAG, "🔄 システム初期化開始...");
-
-    // NVSフラッシュとNimBLEホストスタックを初期化する
     ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -436,173 +241,49 @@ static esp_err_t system_init(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // switch入力初期化
-    ESP_LOGI(TAG, "🔄 スイッチ入力初期化...");
     switch_input_init();
-
-    // ADCの初期化
-    ESP_LOGI(TAG, "🔄 ADCの初期化...");
     init_adc();
-
-    // i2CとGPIOの初期化
-    ESP_LOGI(TAG, "🔄 I2CとGPIOの初期化...");
     init_i2c();
-
-    // GPIOの初期化
-    ESP_LOGI(TAG, "🔄 GPIOの初期化...");
     init_gpio();
+    led_control_init();
+    sht30_init();
+    tsl2591_init();
 
-    // LED制御システム初期化
-    ESP_LOGI(TAG, "🔄 LED制御システム初期化...");
-    ret = led_control_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "LED control initialization failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // SHT30センサー初期化
-    ESP_LOGI(TAG, "🔄 SHT30センサー初期化...");
-    ret = sht30_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "SHT30 initialization failed - temperature/humidity sensor disabled");
-    } else {
-        ESP_LOGI(TAG, "✅ SHT30 temperature/humidity sensor initialized successfully");
-    }
-
-    // TSL2591センサー初期化
-    ESP_LOGI(TAG, "🔄 TSL2591センサー初期化...");
-    ret = tsl2591_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "TSL2591 initialization failed - light sensor disabled");
-    } else {
-        ESP_LOGI(TAG, "✅ TSL2591 light sensor initialized successfully");
-    }
-
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "ESP32-C3 植物管理システム 初期化開始");
-    ESP_LOGI(TAG, "データバッファリング機能付き");
-    ESP_LOGI(TAG, "========================================");
-
-    // 植物管理システムを初期化（内部でNVSとデータバッファも初期化）
-    ESP_LOGI(TAG, "植物管理システムを初期化中...");
-    ret = plant_manager_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "植物管理システムの初期化に失敗: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "✓ 植物管理システム初期化完了");
-
-    // 植物プロファイル情報を出力
+    ESP_ERROR_CHECK(plant_manager_init());
     log_plant_profile();
 
-    // WiFi管理システム初期化
-    int i;
-    for(i=0;i<3;i++){
-        switch(i){
-        case 0:
-            // 1回目はデフォルトSSID/PWを使用
-            strncpy((char*)g_wifi_config.sta.ssid, WIFI_SSID, sizeof(g_wifi_config.sta.ssid) - 1);
-            strncpy((char*)g_wifi_config.sta.password, WIFI_PASSWORD, sizeof(g_wifi_config.sta.password) - 1);
-            break;
-        case 1:
-            // 2回目は予備SSID/PASSを使用
-            strncpy((char*)g_wifi_config.sta.ssid, WIFI_SSID1, sizeof(g_wifi_config.sta.ssid) - 1);
-            strncpy((char*)g_wifi_config.sta.password, WIFI_PASSWORD1, sizeof(g_wifi_config.sta.password) - 1);
-            break;
-        case 2:
-            // 2回目は予備SSID/PASSを使用
-            strncpy((char*)g_wifi_config.sta.ssid, WIFI_SSID2, sizeof(g_wifi_config.sta.ssid) - 1);
-            strncpy((char*)g_wifi_config.sta.password, WIFI_PASSWORD2, sizeof(g_wifi_config.sta.password) - 1);
-            break;
-        }
-        ESP_LOGI(TAG, "🔄 WiFi設定: SSID='%s'", g_wifi_config.sta.ssid);
-        ESP_LOGI(TAG, "🔄 WiFi管理システム初期化... (試行 %d/3)", i+1);
-        ret = wifi_manager_init(wifi_status_callback);
-        if (ret == ESP_OK) {
-            break;
-        }
-        ESP_LOGW(TAG, "WiFi manager initialization attempt %d failed: %s", i+1, esp_err_to_name(ret));
-        vTaskDelay(pdMS_TO_TICKS(2000)); // 2秒待機してから再試行
-    }
-
-    // 時刻同期管理システム初期化
-    ret = time_sync_manager_init(time_sync_callback);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Time sync manager initialization failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // データバッファの初期化
-    ESP_LOGI(TAG, "🔄 データバッファの初期化...");
-    data_buffer_init(); // データバッファの初期化
-
-    ESP_LOGI(TAG, "✅ システム初期化完了");
+    // WiFiと時刻同期の初期化
+    ESP_ERROR_CHECK(wifi_manager_init(wifi_status_callback));
+    ESP_ERROR_CHECK(time_sync_manager_init(time_sync_callback));
+    
+    data_buffer_init();
     return ESP_OK;
 }
 
 /* --- Main Application Entry --- */
-void app_main(void)
-{
-    // 起動直後2秒間停止する
-    vTaskDelay(pdMS_TO_TICKS(2000)); // Keep LED on for a short duration
-
-    // Initialize the system
+void app_main(void) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_LOGI(TAG, "Starting Soil Monitor Application...");
     ESP_ERROR_CHECK(system_init());
 
 #ifdef CONFIG_PM_ENABLE
-    // Power management configuration
-    ESP_LOGI(TAG, "🔄 Power management configuration...");
     esp_pm_config_t pm_config = {
      .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
      .min_freq_mhz = 10,
      .light_sleep_enable = true
     };
     ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
-    ESP_LOGI(TAG, "Power management enabled");
 #endif
 
-    ble_manager_init(); // NimBLEの初期化
+    ble_manager_init();
+    network_init();
 
-    // 時間取得
-    ESP_LOGI(TAG, "🔄 Initializing time and network...");
-    initial_datetime();
-
-    // センサータスク作成（十分なスタックサイズ）
     xTaskCreate(sensor_read_task, "sensor_read", 4096, NULL, 5, &g_sensor_task_handle);
+    xTaskCreate(status_analysis_task, "analysis_task", 6144, NULL, 4, &g_analysis_task_handle);
 
-    // 状態分析タスクを作成（10分間隔）
-    BaseType_t analysis_task_ret = xTaskCreate(
-        status_analysis_task,       // タスク関数
-        "analysis_task",            // タスク名
-        6144,                       // スタックサイズ（大きめ）
-        NULL,                       // パラメータ
-        4,                          // 優先度（センサータスクより少し低く）
-        &g_analysis_task_handle     // タスクハンドル
-    );
-
-    if (analysis_task_ret != pdPASS) {
-        ESP_LOGE(TAG, "状態分析タスクの作成に失敗");
-        return;
-    }
-    ESP_LOGI(TAG, "✓ 状態分析タスク作成完了");
-
-    // タイマータスクを設定します
-    ESP_LOGI(TAG, "🔄 Creating notification timer...");
     g_notify_timer = xTimerCreate("notify_timer", pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS), pdTRUE, NULL, notify_timer_callback);
-    if (g_notify_timer == NULL) {
-        ESP_LOGE(TAG, "Failed to create timer");
-        return;
-    }
-
-    /* [修正箇所] アプリケーション起動直後にタイマーを開始します */
-    if (xTimerStart(g_notify_timer, 0)!= pdPASS) {
-        ESP_LOGE(TAG, "Failed to start timer");
-        return;
-    }
-    ESP_LOGI(TAG, "Notification timer started on boot.");
+    xTimerStart(g_notify_timer, 0);
 
     nimble_port_freertos_init(ble_host_task);
-
     ESP_LOGI(TAG, "Initialization complete.");
 }

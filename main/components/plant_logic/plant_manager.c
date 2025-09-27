@@ -12,10 +12,10 @@ static const char *TAG = "PlantManager";
 // プライベート変数
 static plant_profile_t g_plant_profile;
 static bool g_initialized = false;
-static soil_condition_t g_last_soil_condition = SOIL_WET; // 初期状態は湿潤と仮定
+static plant_condition_t g_last_plant_condition = SOIL_WET; // 初期状態は湿潤と仮定
 
 // プライベート関数の宣言
-static soil_condition_t determine_soil_condition(const plant_profile_t *profile);
+static plant_condition_t determine_plant_condition(const plant_profile_t *profile);
 
 /**
  * 植物管理システムを初期化
@@ -77,26 +77,28 @@ plant_status_result_t plant_manager_determine_status(void) {
 
     if (!g_initialized) {
         ESP_LOGE(TAG, "Plant manager not initialized");
-        result.soil_condition = ERROR_SOIL_CONDITION;
+        result.plant_condition = ERROR_CONDITION;
         return result;
     }
 
-    result.soil_condition = determine_soil_condition(&g_plant_profile);
-    g_last_soil_condition = result.soil_condition;
+    result.plant_condition = determine_plant_condition(&g_plant_profile);
+    g_last_plant_condition = result.plant_condition;
 
     return result;
 }
 
 /**
- * 土壌状態の文字列表現を取得
+ * 植物状態の文字列表現を取得
  */
-const char* plant_manager_get_soil_condition_string(soil_condition_t condition) {
+const char* plant_manager_get_plant_condition_string(plant_condition_t condition) {
     switch (condition) {
         case SOIL_DRY:              return "乾燥";
         case SOIL_WET:              return "湿潤";
         case NEEDS_WATERING:        return "灌水要求";
         case WATERING_COMPLETED:    return "灌水完了";
-        case ERROR_SOIL_CONDITION:  return "エラー";
+        case TEMP_TOO_HIGH:         return "高温限界";
+        case TEMP_TOO_LOW:          return "低温限界";
+        case ERROR_CONDITION:       return "エラー";
         default:                    return "不明";
     }
 }
@@ -142,53 +144,51 @@ void plant_manager_print_system_status(void) {
     // 最新のセンサーデータを表示
     minute_data_t latest_data;
     if (data_buffer_get_latest_minute_data(&latest_data) == ESP_OK) {
-        ESP_LOGI(TAG, "Latest sensor data: soil=%.0fmV", latest_data.soil_moisture);
-    }
-
-    // 最新の日別サマリーを表示
-    daily_summary_data_t latest_summary;
-    if (data_buffer_get_latest_daily_summary(&latest_summary) == ESP_OK) {
-        ESP_LOGI(TAG, "Latest daily summary: soil=%.0fmV", latest_summary.avg_soil_moisture);
+        ESP_LOGI(TAG, "Latest sensor data: temp=%.1f C, soil=%.0fmV", latest_data.temperature, latest_data.soil_moisture);
     }
 }
 
 // プライベート関数の実装
 
 /**
- * 土壌水分状態を判断
+ * 植物の状態を判断
  */
-static soil_condition_t determine_soil_condition(const plant_profile_t *profile) {
-    daily_summary_data_t daily_summaries[7];
-    uint8_t summary_count = 0;
+static plant_condition_t determine_plant_condition(const plant_profile_t *profile) {
     minute_data_t latest_data;
 
     // 最新のセンサーデータを取得
     if (data_buffer_get_latest_minute_data(&latest_data) != ESP_OK) {
-        ESP_LOGW(TAG, "No latest sensor data for soil condition determination");
-        return ERROR_SOIL_CONDITION;
+        ESP_LOGW(TAG, "No latest sensor data for condition determination");
+        return ERROR_CONDITION;
     }
 
     float soil_moisture = latest_data.soil_moisture;
+    float temperature = latest_data.temperature;
 
-    // 灌水判定
-    if (g_last_soil_condition == SOIL_DRY && soil_moisture <= profile->soil_wet_threshold) {
+    // 最優先：気温の限界チェック
+    if (temperature >= profile->temp_high_limit) {
+        return TEMP_TOO_HIGH;
+    }
+    if (temperature <= profile->temp_low_limit) {
+        return TEMP_TOO_LOW;
+    }
+
+    // 灌水完了判定
+    if ((g_last_plant_condition == SOIL_DRY || g_last_plant_condition == NEEDS_WATERING) && soil_moisture <= profile->soil_wet_threshold) {
         return WATERING_COMPLETED;
     }
 
-    // 過去7日間の日別サマリーデータを取得
-    esp_err_t ret = data_buffer_get_recent_daily_summaries(7, daily_summaries, &summary_count);
-    if (ret == ESP_OK && summary_count > 0) {
+    // 灌水要求判定
+    daily_summary_data_t daily_summaries[7];
+    uint8_t summary_count = 0;
+    esp_err_t ret = data_buffer_get_recent_daily_summaries(profile->soil_dry_days_for_watering, daily_summaries, &summary_count);
+    if (ret == ESP_OK && summary_count >= profile->soil_dry_days_for_watering) {
         int consecutive_dry_days = 0;
-        // 過去データから連続乾燥日数をカウント（最新から過去へ）
-        for (int i = summary_count - 1; i >= 0; i--) {
+        for (int i = 0; i < summary_count; i++) {
             if (daily_summaries[i].avg_soil_moisture >= profile->soil_dry_threshold) {
                 consecutive_dry_days++;
-            } else {
-                break; // 連続が途切れた場合終了
             }
         }
-
-        // 灌水要求判定
         if (consecutive_dry_days >= profile->soil_dry_days_for_watering) {
             ESP_LOGD(TAG, "Needs watering: consecutive_dry_days=%d >= %d",
                      consecutive_dry_days, profile->soil_dry_days_for_watering);
@@ -209,5 +209,5 @@ static soil_condition_t determine_soil_condition(const plant_profile_t *profile)
     }
 
     // 上記のいずれにも当てはまらない場合は、最後と同じ状態を維持
-    return g_last_soil_condition;
+    return g_last_plant_condition;
 }
