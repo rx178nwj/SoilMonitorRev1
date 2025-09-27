@@ -78,20 +78,6 @@ typedef enum {
 void ble_manager_init(void);    // BLEマネージャー初期化
 void ble_host_task(void *param); // BLEホストタスク
 void print_ble_system_info(void); // BLEシステム情報を表示
-
-// BLE GATT Access Callback
-static int gatt_svr_access_sensor_data_cb(uint16_t conn_handle, uint16_t attr_handle,
-                              struct ble_gatt_access_ctxt *ctxt, void *arg);
-// BLE GATT Access Callback
-static int gatt_svr_access_data_status_cb(uint16_t conn_handle, uint16_t attr_handle,
-                              struct ble_gatt_access_ctxt *ctxt, void *arg);
-static int gap_event_handler(struct ble_gap_event *event, void *arg);
-void ble_manager_init(void);    // BLEマネージャー初期化
-
-void ble_host_task(void *param); // BLEホストタスク
 void start_advertising(void);   // 広告開始
-static void on_reset(int reason); // リセット時のコールバック
-static void on_sync(void);      // 同期時のコールバック
 
-
-#endif // BLE_MANAGER_H 
+#endif // BLE_MANAGER_H
