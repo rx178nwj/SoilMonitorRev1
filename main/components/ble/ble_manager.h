@@ -4,6 +4,7 @@
 #include <time.h>
 #include <stdint.h>
 #include "host/ble_hs.h" // ble_gap_event のためにインクルード
+#include "../plant_logic/plant_manager.h" // plant_profile_t のためにインクルード
 
 /* --- Command and Response Data Structures --- */
 
@@ -52,7 +53,7 @@ typedef struct __attribute__((packed)) {
 typedef enum {
     CMD_GET_SENSOR_DATA = 0x01,     // 最新センサーデータ取得
     CMD_GET_SYSTEM_STATUS = 0x02,   // システム状態取得（メモリ使用量、稼働時間等）
-    CMD_SET_THRESHOLD = 0x03,       // 土壌水分しきい値設定
+    CMD_SET_PLANT_PROFILE = 0x03,   // 植物プロファイル設定
     CMD_GET_HISTORY_DATA = 0x04,    // 履歴データ取得
     CMD_SYSTEM_RESET = 0x05,        // システムリセット
     CMD_GET_DEVICE_INFO = 0x06,     // デバイス情報取得（名前、FWバージョン等）

@@ -25,6 +25,7 @@
 #include "ble_manager.h"
 #include "../../common_types.h"
 #include "../plant_logic/data_buffer.h"
+#include "../../nvs_config.h" // nvs_config_save_plant_profile のためにインクルード
 
 // 仮のデータバッファ (実際のプロジェクトに合わせてください)
 extern soil_data_t data_buffer[24 * 60];
@@ -60,7 +61,7 @@ static void on_reset(int reason);
 static esp_err_t process_ble_command(const ble_command_packet_t *cmd_packet, uint8_t *response_buffer, size_t *response_length);
 static esp_err_t handle_get_sensor_data(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
 static esp_err_t handle_get_system_status(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
-static esp_err_t handle_set_threshold(const uint8_t *data, uint16_t data_length, uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
+static esp_err_t handle_set_plant_profile(const uint8_t *data, uint16_t data_length, uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
 static esp_err_t handle_get_device_info(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
 static esp_err_t handle_get_time_data(const uint8_t *data, uint16_t data_length, uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length);
 static esp_err_t find_data_by_time(const struct tm *target_time, time_data_response_t *result);
@@ -181,7 +182,7 @@ static int gatt_svr_access_command_cb(uint16_t conn_handle, uint16_t attr_handle
         ESP_LOGE(TAG, "Invalid command packet size: %d", data_len);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
-    
+
     // FIX: OS_MBUF_DATAマクロの誤用を修正
     ble_command_packet_t *cmd_packet = (ble_command_packet_t *)ctxt->om->om_data;
 
@@ -230,7 +231,6 @@ static int gatt_svr_access_data_transfer_cb(uint16_t conn_handle, uint16_t attr_
 }
 
 /* --- Command Processing Engine --- */
-// (process_ble_command関数は変更なし)
 static esp_err_t process_ble_command(const ble_command_packet_t *cmd_packet,
                                      uint8_t *response_buffer, size_t *response_length)
 {
@@ -246,8 +246,8 @@ static esp_err_t process_ble_command(const ble_command_packet_t *cmd_packet,
         case CMD_GET_SYSTEM_STATUS:
             err = handle_get_system_status(cmd_packet->sequence_num, response_buffer, response_length);
             break;
-        case CMD_SET_THRESHOLD:
-            err = handle_set_threshold(cmd_packet->data, cmd_packet->data_length, cmd_packet->sequence_num, response_buffer, response_length);
+        case CMD_SET_PLANT_PROFILE:
+            err = handle_set_plant_profile(cmd_packet->data, cmd_packet->data_length, cmd_packet->sequence_num, response_buffer, response_length);
             break;
         case CMD_SYSTEM_RESET: {
             ble_response_packet_t *resp = (ble_response_packet_t *)response_buffer;
@@ -268,14 +268,13 @@ static esp_err_t process_ble_command(const ble_command_packet_t *cmd_packet,
             err = handle_get_time_data(cmd_packet->data, cmd_packet->data_length, cmd_packet->sequence_num, response_buffer, response_length);
             break;
         case CMD_GET_SWITCH_STATUS:
-            // FIX: 未実装コマンドのエラーハンドリングを追加
             err = ESP_ERR_NOT_SUPPORTED;
             ble_response_packet_t *resp = (ble_response_packet_t *)response_buffer;
             resp->response_id = CMD_GET_SWITCH_STATUS;
             resp->status_code = RESP_STATUS_INVALID_COMMAND;
             resp->sequence_num = cmd_packet->sequence_num;
             resp->data_length = 0;
-            
+
             uint8_t switch_state = 0; // 仮のスイッチ状態
             switch_state = switch_input_is_pressed();
             memcpy(resp->data, &switch_state, sizeof(switch_state));
@@ -298,15 +297,11 @@ static esp_err_t process_ble_command(const ble_command_packet_t *cmd_packet,
 }
 
 /* --- Command Handlers --- */
-// 最新のセンサーデータを取得するハンドラ
 static esp_err_t handle_get_sensor_data(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length)
 {
-    // FIX: 'timestamp'メンバが存在しないエラーと初期化エラーを修正
     soil_data_t latest_data;
     minute_data_t minute_data;
-    //memset(&latest_data, 0, sizeof(soil_data_t));
-    
-    // 最新のデータを取得する
+
     esp_err_t ret = data_buffer_get_latest_minute_data(&minute_data);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get latest sensor data");
@@ -318,48 +313,31 @@ static esp_err_t handle_get_sensor_data(uint8_t sequence_num, uint8_t *response_
         *response_length = sizeof(ble_response_packet_t);
         return ret;
     }
-    ESP_LOGI(TAG, "Latest sensor data: timestamp=%04d-%02d-%02d %02d:%02d:%02d",
-             minute_data.timestamp.tm_year + 1900, minute_data.timestamp.tm_mon + 1,
-             minute_data.timestamp.tm_mday, minute_data.timestamp.tm_hour,
-             minute_data.timestamp.tm_min, minute_data.timestamp.tm_sec);
-    ESP_LOGI(TAG, "Latest sensor data: Lux=%.2f, Temp=%.2f, Humidity=%.2f, Soil Moisture=%d mV",
-             minute_data.lux, minute_data.temperature, minute_data.humidity, (int)minute_data.soil_moisture);   
-    
     g_total_sensor_readings++;
 
-    // soil_data_tにデータをコピー
     latest_data.datetime = minute_data.timestamp;
     latest_data.lux = minute_data.lux;
     latest_data.temperature = minute_data.temperature;
     latest_data.humidity = minute_data.humidity;
     latest_data.soil_moisture = minute_data.soil_moisture;
-    
-    // ヘッダを設定
+
     ble_response_packet_t *resp = (ble_response_packet_t *)response_buffer;
     resp->response_id = CMD_GET_SENSOR_DATA;
     resp->status_code = RESP_STATUS_SUCCESS;
     resp->sequence_num = sequence_num;
     resp->data_length = sizeof(soil_data_t);
-    
-    ESP_LOGI(TAG, "Sending sensor data response packet : ID=0x%02X, Seq=%d, Len=%d",
-             resp->response_id, resp->sequence_num, resp->data_length);
 
-    // bleパケットデータへデータをコピー
     memcpy(resp->data, &latest_data, sizeof(soil_data_t));
     *response_length = sizeof(ble_response_packet_t) + sizeof(soil_data_t);
-    
-    ESP_LOGI(TAG, "Sending sensor data response packet : ID=0x%02X, Seq=%d, Len=%d, response_length=%d",
-             resp->response_id, resp->sequence_num, resp->data_length, *response_length);
 
     return ESP_OK;
 }
 
-// (handle_get_system_status, handle_set_threshold, handle_get_device_info関数は変更なし)
 static esp_err_t handle_get_system_status(uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length)
 {
     size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t min_free_heap = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-    
+
     char status_str[128];
     snprintf(status_str, sizeof(status_str), "Uptime: %lu s, Free Heap: %u, Min Free: %u",
              g_system_uptime, (unsigned int)free_heap, (unsigned int)min_free_heap);
@@ -376,20 +354,29 @@ static esp_err_t handle_get_system_status(uint8_t sequence_num, uint8_t *respons
     return ESP_OK;
 }
 
-static esp_err_t handle_set_threshold(const uint8_t *data, uint16_t data_length, uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length)
+static esp_err_t handle_set_plant_profile(const uint8_t *data, uint16_t data_length, uint8_t sequence_num, uint8_t *response_buffer, size_t *response_length)
 {
     ble_response_packet_t *resp = (ble_response_packet_t *)response_buffer;
-    resp->response_id = CMD_SET_THRESHOLD;
+    resp->response_id = CMD_SET_PLANT_PROFILE;
     resp->sequence_num = sequence_num;
     resp->data_length = 0;
 
-    if (data_length != sizeof(float)) {
+    if (data_length != sizeof(plant_profile_t)) {
         resp->status_code = RESP_STATUS_INVALID_PARAMETER;
     } else {
-        float threshold;
-        memcpy(&threshold, data, sizeof(float));
-        ESP_LOGI(TAG, "New threshold set: %.2f", threshold);
-        resp->status_code = RESP_STATUS_SUCCESS;
+        plant_profile_t profile;
+        memcpy(&profile, data, sizeof(plant_profile_t));
+        ESP_LOGI(TAG, "New plant profile received: %s", profile.plant_name);
+
+        esp_err_t err = nvs_config_save_plant_profile(&profile);
+        if (err == ESP_OK) {
+            plant_manager_update_profile(&profile); // Update in-memory profile
+            resp->status_code = RESP_STATUS_SUCCESS;
+            ESP_LOGI(TAG, "Plant profile saved to NVS and updated successfully.");
+        } else {
+            resp->status_code = RESP_STATUS_ERROR;
+            ESP_LOGE(TAG, "Failed to save plant profile to NVS.");
+        }
     }
 
     *response_length = sizeof(ble_response_packet_t);
@@ -401,8 +388,6 @@ static esp_err_t handle_get_device_info(uint8_t sequence_num, uint8_t *response_
     device_info_t info;
     memset(&info, 0, sizeof(device_info_t));
 
-    // デバイス情報を設定
-    // NOTE: APP_NAME, SOFTWARE_VERSION, HARDWARE_VERSIONはプロジェクトに合わせて定義されていると仮定
     strncpy(info.device_name, APP_NAME, sizeof(info.device_name) - 1);
     strncpy(info.firmware_version, SOFTWARE_VERSION, sizeof(info.firmware_version) - 1);
     strncpy(info.hardware_version, HARDWARE_VERSION, sizeof(info.hardware_version) - 1);
@@ -440,7 +425,6 @@ static esp_err_t handle_get_time_data(const uint8_t *data, uint16_t data_length,
     const time_data_request_t *req = (const time_data_request_t *)data;
     time_data_response_t result_data;
 
-    // FIX: アライメント問題を回避するため、一度ローカル変数にコピーする
     struct tm requested_time_aligned;
     memcpy(&requested_time_aligned, &req->requested_time, sizeof(struct tm));
 
@@ -463,7 +447,6 @@ static esp_err_t handle_get_time_data(const uint8_t *data, uint16_t data_length,
 }
 
 /* --- Helper Functions --- */
-// (send_response_notification関数は変更なし)
 static esp_err_t send_response_notification(const uint8_t *response_data, size_t response_length)
 {
     if (g_conn_handle == BLE_HS_CONN_HANDLE_NONE || !g_is_subscribed_response) {
@@ -487,8 +470,6 @@ static esp_err_t send_response_notification(const uint8_t *response_data, size_t
     }
 }
 
-// FIX: 未使用の関数 `compare_time_minute` を削除
-
 static esp_err_t find_data_by_time(const struct tm *target_time, time_data_response_t *result)
 {
     esp_err_t err;
@@ -497,15 +478,13 @@ static esp_err_t find_data_by_time(const struct tm *target_time, time_data_respo
         return ESP_ERR_INVALID_ARG;
     }
 
-    // FIX: 型不一致エラーを修正
     minute_data_t found_data;
     err = data_buffer_get_minute_data(target_time, &found_data);
-    
+
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Data found in data_buffer for time: %04d-%02d-%02d %02d:%02d",
                  target_time->tm_year + 1900, target_time->tm_mon + 1, target_time->tm_mday,
                  target_time->tm_hour, target_time->tm_min);
-        // NOTE: minute_data_t と time_data_response_t のメンバ構成が同じと仮定
         memcpy(result, &found_data, sizeof(time_data_response_t));
         return ESP_OK;
     } else if (err != ESP_ERR_NOT_FOUND) {
@@ -519,7 +498,6 @@ static esp_err_t find_data_by_time(const struct tm *target_time, time_data_respo
 
 
 /* --- BLE Event Handlers --- */
-// (gap_event_handler関数は変更なし)
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
@@ -529,7 +507,6 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
                  event->connect.status);
         if (event->connect.status == 0) {
             g_conn_handle = event->connect.conn_handle;
-            // gpio_set_level(BLU_LED_GPIO_PIN, 1); // NOTE: BLU_LED_GPIO_PINが未定義
         } else {
             start_advertising();
         }
@@ -542,7 +519,6 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
         g_is_subscribed_response = false;
         g_is_subscribed_data_transfer = false;
         g_command_processing = false;
-        // gpio_set_level(BLU_LED_GPIO_PIN, 0); // NOTE: BLU_LED_GPIO_PINが未定義
         start_advertising();
         return 0;
 
@@ -571,7 +547,6 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
-// FIX: 'static'宣言の不整合を修正
 void start_advertising(void)
 {
     struct ble_gap_adv_params adv_params;
@@ -646,7 +621,6 @@ void ble_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-// (ble_manager_init, print_ble_system_info関数は変更なし)
 void ble_manager_init(void)
 {
     esp_err_t ret;
@@ -683,7 +657,7 @@ void print_ble_system_info(void)
     ESP_LOGI(TAG, "📡 Available commands:");
     ESP_LOGI(TAG, "  - 0x01: Get Sensor Data");
     ESP_LOGI(TAG, "  - 0x02: Get System Status");
-    ESP_LOGI(TAG, "  - 0x03: Set Threshold");
+    ESP_LOGI(TAG, "  - 0x03: Set Plant Profile");
     ESP_LOGI(TAG, "  - 0x05: System Reset");
     ESP_LOGI(TAG, "  - 0x06: Get Device Info");
     ESP_LOGI(TAG, "  - 0x0A: Get Time-Specific Data");

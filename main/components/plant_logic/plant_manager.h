@@ -70,6 +70,12 @@ const char* plant_manager_get_soil_condition_string(soil_condition_t condition);
 const plant_profile_t* plant_manager_get_profile(void);
 
 /**
+ * 現在実行中の植物プロファイルを更新
+ * @param new_profile 新しい植物プロファイル
+ */
+void plant_manager_update_profile(const plant_profile_t *new_profile);
+
+/**
  * システム全体の状態情報をログ出力
  */
 void plant_manager_print_system_status(void);

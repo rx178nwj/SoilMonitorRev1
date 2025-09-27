@@ -113,6 +113,18 @@ const plant_profile_t* plant_manager_get_profile(void) {
 }
 
 /**
+ * 現在実行中の植物プロファイルを更新
+ */
+void plant_manager_update_profile(const plant_profile_t *new_profile) {
+    if (!g_initialized || new_profile == NULL) {
+        ESP_LOGE(TAG, "Cannot update profile: Not initialized or new profile is NULL");
+        return;
+    }
+    memcpy(&g_plant_profile, new_profile, sizeof(plant_profile_t));
+    ESP_LOGI(TAG, "Plant profile updated in memory: %s", g_plant_profile.plant_name);
+}
+
+/**
  * システム全体の状態情報をログ出力
  */
 void plant_manager_print_system_status(void) {
