@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "plant_manager.h"
+#include "../../common_types.h" // 修正：plant_manager.hの代わりにcommon_types.hをインクルード
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,7 +17,8 @@ extern "C" {
 /**
  * 1分間隔のセンサーデータ構造体
  */
-typedef struct {
+// 修正： 構造体に 'minute_data_t' というタグ名を追加
+typedef struct minute_data_t {
     struct tm timestamp;     // タイムスタンプ
     float temperature;       // 気温 (℃)
     float humidity;          // 湿度 (%)
@@ -29,7 +30,8 @@ typedef struct {
 /**
  * 1日のサマリーデータ構造体
  */
-typedef struct {
+// 修正： 構造体に 'daily_summary_data_t' というタグ名を追加
+typedef struct daily_summary_data_t {
     struct tm date;                    // 日付
     float max_temperature;             // 最高気温
     float min_temperature;             // 最低気温

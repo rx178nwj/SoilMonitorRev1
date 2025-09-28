@@ -129,6 +129,7 @@ esp_err_t tsl2591_init(void)
     return ESP_OK;
 }
 
+
 // TSL2591照度センサー読み取り
 esp_err_t tsl2591_read_data(tsl2591_data_t *data)
 {
@@ -138,50 +139,59 @@ esp_err_t tsl2591_read_data(tsl2591_data_t *data)
     }
 
     esp_err_t ret;
-    uint8_t sensor_data[4];
-    
-    // データレジスタを連続読み取り（C0DATAL から C1DATAH まで）
-    ESP_LOGI(TAG, "TSL2591 データ読み取り開始...");
-    uint8_t cmd = TSL2591_COMMAND_BIT | TSL2591_NORMAL_OPERATION | TSL2591_REGISTER_C0DATAL;
-    // コマンドビットとレジスタアドレスを設定
-    ESP_LOGI(TAG, "TSL2591 コマンド: 0x%02X", cmd);
-    ret = i2c_master_write_to_device(I2C_NUM_0, TSL2591_ADDR, &cmd, 1, pdMS_TO_TICKS(100));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "TSL2591: コマンド書き込み失敗: %s", esp_err_to_name(ret));
-        data->error = true;
-        return ret;
-    }
-    // データ読み取り
-    ESP_LOGI(TAG, "TSL2591 データ読み取り中...");
-    ret = i2c_master_read_from_device(I2C_NUM_0, TSL2591_ADDR, sensor_data, 4, pdMS_TO_TICKS(100));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "TSL2591: データ読み取り失敗: %s", esp_err_to_name(ret));
-        data->error = true;
-        return ret;
-    }
-    // データを16ビットのCH0とCH1に分割
-    ESP_LOGI(TAG, "TSL2591 データ読み取り完了");
-    ESP_LOGD(TAG, "TSL2591 生データ: %02X %02X %02X %02X", 
-             sensor_data[0], sensor_data[1], sensor_data[2], sensor_data[3]);
-    uint16_t ch0 = (sensor_data[1] << 8) | sensor_data[0]; // CH0 (Full spectrum)
-    uint16_t ch1 = (sensor_data[3] << 8) | sensor_data[2]; // CH1 (IR spectrum)
-    
-    ESP_LOGD(TAG, "TSL2591 生データ: CH0=%d, CH1=%d, ゲイン=%dx, 積分時間=%dms", 
-             ch0, ch1, (int)get_gain_factor(current_config.gain), 
-             (int)get_integration_time_ms(current_config.integration));
-    
-    // 自動ゲイン調整
-    ESP_LOGI(TAG, "TSL2591 自動ゲイン調整中...");
-    tsl2591_auto_adjust_gain(ch0);
-    
+    uint16_t ch0, ch1;
+    bool saturated = false;
+    int attempts = 4; // 最大4回まで試行（ゲイン設定は4段階のため）
+
+    do {
+        // センサーから生データを読み取る
+        uint8_t sensor_data[4];
+        uint8_t cmd = TSL2591_COMMAND_BIT | TSL2591_NORMAL_OPERATION | TSL2591_REGISTER_C0DATAL;
+        ret = i2c_master_write_read_device(I2C_NUM_0, TSL2591_ADDR, &cmd, 1, sensor_data, 4, pdMS_TO_TICKS(200));
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "TSL2591: データ読み取り失敗: %s", esp_err_to_name(ret));
+            data->error = true;
+            return ret;
+        }
+
+        ch0 = (sensor_data[1] << 8) | sensor_data[0];
+        ch1 = (sensor_data[3] << 8) | sensor_data[2];
+
+        // 飽和チェック
+        uint16_t max_count = (current_config.integration == TSL2591_INTEGRATIONTIME_100MS)? 36863 : 65535;
+        saturated = (ch0 >= max_count || ch1 >= max_count);
+
+        if (saturated) {
+            ESP_LOGW(TAG, "センサー飽和検出！ ゲインを下げて再測定します (ch0=%d, ch1=%d)", ch0, ch1);
+            // ゲインを下げる
+            if (current_config.gain > TSL2591_GAIN_LOW) {
+                // enumの値が0x10ずつ増加することを利用
+                tsl2591_gain_t new_gain = (tsl2591_gain_t)(current_config.gain - 0x10);
+                
+                tsl2591_config_t new_config = {
+                    .gain = new_gain,
+                    .integration = current_config.integration
+                };
+                tsl2591_set_config(&new_config); // 新しい設定を適用
+                vTaskDelay(pdMS_TO_TICKS(120)); // 新しい積分時間でデータが更新されるのを待つ
+            } else {
+                // 既に最低ゲインならループを抜ける
+                ESP_LOGW(TAG, "最低ゲインでも飽和しています");
+                break;
+            }
+        }
+        attempts--;
+    } while (saturated && attempts > 0);
+
     // Lux計算
-    ESP_LOGI(TAG, "TSL2591 照度計算中...");
     data->light_lux = calculate_lux(ch0, ch1);
     data->error = false;
     
-    // デバッグログ
-    ESP_LOGI(TAG, "TSL2591 読み取り完了");
-    ESP_LOGI(TAG, "TSL2591 照度計算完了: %.2f Lux", data->light_lux);
+    // 照度が低い場合はゲインを上げる（既存の自動ゲイン調整ロジック）
+    tsl2591_auto_adjust_gain(ch0);
+    
+    ESP_LOGI(TAG, "TSL2591 読み取り完了: %.2f Lux", data->light_lux);
         
     return ESP_OK;
 }
@@ -189,50 +199,24 @@ esp_err_t tsl2591_read_data(tsl2591_data_t *data)
 // TSL2591 自動ゲイン調整
 esp_err_t tsl2591_auto_adjust_gain(uint16_t ch0)
 {
-    tsl2591_gain_t new_gain = current_config.gain;
-    bool need_adjustment = false;
+    // この関数は、照度が低すぎて測定値が小さい場合にゲインを上げる役割に限定する
     
-    // 飽和チェック（最大カウントの90%以上）
-    uint16_t max_count = (current_config.integration == TSL2591_INTEGRATIONTIME_100MS) ? 36863 : 65535;
-    
-    if (ch0 > max_count * 0.9) {
-        // 飽和気味 - ゲインを下げる
-        if (current_config.gain == TSL2591_GAIN_MAX) {
-            new_gain = TSL2591_GAIN_HIGH;
-            need_adjustment = true;
-        } else if (current_config.gain == TSL2591_GAIN_HIGH) {
-            new_gain = TSL2591_GAIN_MED;
-            need_adjustment = true;
-        } else if (current_config.gain == TSL2591_GAIN_MED) {
-            new_gain = TSL2591_GAIN_LOW;
-            need_adjustment = true;
-        }
-    } else if (ch0 < 100) {
-        // 信号が小さすぎる - ゲインを上げる
-        if (current_config.gain == TSL2591_GAIN_LOW) {
-            new_gain = TSL2591_GAIN_MED;
-            need_adjustment = true;
-        } else if (current_config.gain == TSL2591_GAIN_MED) {
-            new_gain = TSL2591_GAIN_HIGH;
-            need_adjustment = true;
-        } else if (current_config.gain == TSL2591_GAIN_HIGH) {
-            new_gain = TSL2591_GAIN_MAX;
-            need_adjustment = true;
-        }
-    }
-    
-    if (need_adjustment) {
-        ESP_LOGI(TAG, "自動ゲイン調整: %d から %d へ", current_config.gain >> 4, new_gain >> 4);
-        current_config.gain = new_gain;
+    // 信号が小さすぎるかチェック
+    if (ch0 < 100 && current_config.gain < TSL2591_GAIN_MAX) {
+        // ゲインを上げる
+        tsl2591_gain_t new_gain = (tsl2591_gain_t)(current_config.gain + 0x10);
+        if (new_gain > TSL2591_GAIN_MAX) new_gain = TSL2591_GAIN_MAX;
+
+        ESP_LOGI(TAG, "自動ゲイン調整（UP）: %d から %d へ", current_config.gain >> 4, new_gain >> 4);
         
-        uint8_t config = current_config.gain | current_config.integration;
-        // 新しい設定を書き込み
-        ESP_LOGI(TAG, "TSL2591 新しい設定: ゲイン=%dx, 積分時間=%dms", 
-                 (int)get_gain_factor(current_config.gain), 
-                 (int)get_integration_time_ms(current_config.integration));
-        esp_err_t ret = tsl2591_write_register(TSL2591_REGISTER_CONFIG, config);
+        tsl2591_config_t new_config = {
+            .gain = new_gain,
+            .integration = current_config.integration
+        };
+        
+        esp_err_t ret = tsl2591_set_config(&new_config);
         if (ret == ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(200)); // 新しい設定で安定化
+            vTaskDelay(pdMS_TO_TICKS(120)); // 新しい設定で安定化
         }
         return ret;
     }

@@ -76,6 +76,12 @@ static esp_err_t init_i2c(void) {
     }
     return ret;
 }
+// qsortのための比較関数を追加
+static int compare_floats(const void *a, const void *b) {
+    float fa = *(const float *)a;
+    float fb = *(const float *)b;
+    return (fa > fb) - (fa < fb);
+}
 
 // 全センサーデータ読み取り
 static void read_all_sensors(soil_data_t *data) {
@@ -99,13 +105,46 @@ static void read_all_sensors(soil_data_t *data) {
         data->sensor_error = true;
     }
 
+    // TSL2591から5回データを取得
     tsl2591_data_t tsl2591;
-    if (tsl2591_read_data(&tsl2591) == ESP_OK) {
-        data->lux = tsl2591.light_lux;
-        ESP_LOGI(TAG, "  - TSL2591: Lux=%.1f", data->lux);
+    float lux_readings[5];
+    int valid_readings = 0;
+    for (int i = 0; i < 5; i++) {
+        if (tsl2591_read_data(&tsl2591) == ESP_OK) {
+            lux_readings[valid_readings] = tsl2591.light_lux;
+            valid_readings++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50)); // 測定間に短い待機時間を入れる
+    }
+
+    if (valid_readings >= 3) {
+        // 読み取った値をソート
+        qsort(lux_readings, valid_readings, sizeof(float), compare_floats);
+
+        // 最小値と最大値を除外して平均を計算
+        float sum = 0;
+        // 実際に有効な読み取りが5回未満の場合も考慮
+        int start_index = (valid_readings > 3) ? 1 : 0;
+        int end_index = (valid_readings > 4) ? valid_readings - 1 : valid_readings;
+        int count_for_avg = 0;
+
+        for (int i = start_index; i < end_index; i++) {
+            sum += lux_readings[i];
+            count_for_avg++;
+        }
+        
+        if (count_for_avg > 0) {
+            data->lux = sum / count_for_avg;
+        } else {
+             // 3回しか読み取れなかった場合など
+            data->lux = lux_readings[0];
+        }
+
+        ESP_LOGI(TAG, "  - TSL2591: Lux=%.1f (Avg of %d readings)", data->lux, count_for_avg);
     } else {
-        ESP_LOGE(TAG, "  - TSL2591: Failed to read data");
+        ESP_LOGE(TAG, "  - TSL2591: Failed to get enough valid readings (%d)", valid_readings);
         data->sensor_error = true;
+        data->lux = 0; // エラー時は0を設定
     }
 }
 

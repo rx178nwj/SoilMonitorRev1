@@ -3,11 +3,13 @@
 #include <time.h>
 #include "esp_err.h"
 #include "../../common_types.h"
-#include "data_buffer.h" // minute_data_t の定義をインクルード
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Forward declaration to break circular dependency
+struct minute_data_t;
 
 /**
  * 設定値管理構造体
@@ -60,7 +62,7 @@ void plant_manager_process_sensor_data(const soil_data_t *sensor_data);
  * @param latest_data 判断に使用する最新のセンサーデータ
  * @return 植物状態の判断結果
  */
-plant_status_result_t plant_manager_determine_status(const minute_data_t *latest_data);
+plant_status_result_t plant_manager_determine_status(const struct minute_data_t *latest_data);
 
 
 /**
