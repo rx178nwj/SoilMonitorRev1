@@ -1,3 +1,5 @@
+// main/main.c
+
 /**
  * @file main.c
  * @brief ESP-IDF v5.5 NimBLE Power-Saving Peripheral for Sensor Data
@@ -81,18 +83,29 @@ static void read_all_sensors(soil_data_t *data) {
     struct tm datetime;
     time_sync_manager_get_current_time(&datetime);
     data->datetime = datetime;
+    data->sensor_error = false; // エラーフラグを初期化
 
     data->soil_moisture = (float)read_moisture_sensor();
+    ESP_LOGI(TAG, "  - Soil Moisture: %.0f mV", data->soil_moisture);
+
 
     sht30_data_t sht30;
     if (sht30_read_data(&sht30) == ESP_OK) {
         data->temperature = sht30.temperature;
         data->humidity = sht30.humidity;
+        ESP_LOGI(TAG, "  - SHT30: Temp=%.1f C, Hum=%.1f %%", data->temperature, data->humidity);
+    } else {
+        ESP_LOGE(TAG, "  - SHT30: Failed to read data");
+        data->sensor_error = true;
     }
 
     tsl2591_data_t tsl2591;
     if (tsl2591_read_data(&tsl2591) == ESP_OK) {
         data->lux = tsl2591.light_lux;
+        ESP_LOGI(TAG, "  - TSL2591: Lux=%.1f", data->lux);
+    } else {
+        ESP_LOGE(TAG, "  - TSL2591: Failed to read data");
+        data->sensor_error = true;
     }
 }
 
@@ -166,21 +179,34 @@ static void status_analysis_task(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(10000)); // 10秒待機
 
     while (1) {
-        plant_status_result_t status = plant_manager_determine_status();
-        minute_data_t latest_sensor;
+        // 追加: 分析開始前にデータバッファの状態を確認
+        ESP_LOGI(TAG, "Analyzing plant status...");
+        data_buffer_print_status();
 
-        if (data_buffer_get_latest_minute_data(&latest_sensor) == ESP_OK) {
-            soil_data_t display_data = {
-                .datetime = latest_sensor.timestamp,
-                .temperature = latest_sensor.temperature,
-                .humidity = latest_sensor.humidity,
-                .lux = latest_sensor.lux,
-                .soil_moisture = latest_sensor.soil_moisture
-            };
-            log_sensor_data_and_status(&display_data, &status, ++analysis_count);
+        plant_status_result_t status;
+        minute_data_t latest_sensor;
+        soil_data_t display_data = {0}; // ゼロで初期化
+
+        // 最初に最新データを一度だけ取得
+        if (data_buffer_get_latest_minute_data(&latest_sensor) == ESP_OK && latest_sensor.valid) {
+            // 取得したデータを使って状態を判断
+            status = plant_manager_determine_status(&latest_sensor);
+
+            // ログ表示用に同じデータをコピー
+            display_data.datetime = latest_sensor.timestamp;
+            display_data.temperature = latest_sensor.temperature;
+            display_data.humidity = latest_sensor.humidity;
+            display_data.lux = latest_sensor.lux;
+            display_data.soil_moisture = latest_sensor.soil_moisture;
         } else {
-            ESP_LOGW(TAG, "最新センサーデータの取得に失敗");
+            // データ取得失敗またはデータが無効な場合
+            ESP_LOGW(TAG, "最新センサーデータの取得に失敗、またはデータが無効です");
+            status.plant_condition = ERROR_CONDITION;
+            // display_dataはゼロのまま
         }
+
+        // 結果をログに出力
+        log_sensor_data_and_status(&display_data, &status, ++analysis_count);
 
         switch (status.plant_condition) {
             case TEMP_TOO_HIGH:
@@ -203,6 +229,10 @@ static void status_analysis_task(void *pvParameters) {
                 break;
             case WATERING_COMPLETED:
                 ws2812_set_preset_color(WS2812_COLOR_WHITE);
+                break;
+            case ERROR_CONDITION:
+                ws2812_set_preset_color(WS2812_COLOR_PURPLE); // エラー時は紫色
+                ESP_LOGE(TAG, "❌ エラー状態です！");
                 break;
             default:
                 ws2812_set_preset_color(WS2812_COLOR_OFF);
@@ -287,3 +317,4 @@ void app_main(void) {
     nimble_port_freertos_init(ble_host_task);
     ESP_LOGI(TAG, "Initialization complete.");
 }
+

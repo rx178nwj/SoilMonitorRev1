@@ -1,3 +1,5 @@
+// main/components/plant_logic/plant_manager.c
+
 #include "plant_manager.h"
 #include "../../nvs_config.h"
 #include "data_buffer.h"
@@ -15,7 +17,7 @@ static bool g_initialized = false;
 static plant_condition_t g_last_plant_condition = SOIL_WET; // 初期状態は湿潤と仮定
 
 // プライベート関数の宣言
-static plant_condition_t determine_plant_condition(const plant_profile_t *profile);
+static plant_condition_t determine_plant_condition(const plant_profile_t *profile, const minute_data_t *latest_data);
 
 /**
  * 植物管理システムを初期化
@@ -65,14 +67,14 @@ void plant_manager_process_sensor_data(const soil_data_t *sensor_data) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add sensor data to buffer: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGD(TAG, "Sensor data added to buffer successfully");
+        ESP_LOGI(TAG, "Sensor data added to buffer successfully. Soil Moisture: %.0fmV", sensor_data->soil_moisture);
     }
 }
 
 /**
  * 植物の状態を総合的に判断（データバッファの過去データを使用）
  */
-plant_status_result_t plant_manager_determine_status(void) {
+plant_status_result_t plant_manager_determine_status(const minute_data_t *latest_data) {
     plant_status_result_t result = {0};
 
     if (!g_initialized) {
@@ -81,7 +83,13 @@ plant_status_result_t plant_manager_determine_status(void) {
         return result;
     }
 
-    result.plant_condition = determine_plant_condition(&g_plant_profile);
+    if (latest_data == NULL || !latest_data->valid) {
+        ESP_LOGW(TAG, "Invalid or NULL data passed to determine_status");
+        result.plant_condition = ERROR_CONDITION;
+        return result;
+    }
+
+    result.plant_condition = determine_plant_condition(&g_plant_profile, latest_data);
     g_last_plant_condition = result.plant_condition;
 
     return result;
@@ -153,17 +161,10 @@ void plant_manager_print_system_status(void) {
 /**
  * 植物の状態を判断
  */
-static plant_condition_t determine_plant_condition(const plant_profile_t *profile) {
-    minute_data_t latest_data;
-
-    // 最新のセンサーデータを取得
-    if (data_buffer_get_latest_minute_data(&latest_data) != ESP_OK) {
-        ESP_LOGW(TAG, "No latest sensor data for condition determination");
-        return ERROR_CONDITION;
-    }
-
-    float soil_moisture = latest_data.soil_moisture;
-    float temperature = latest_data.temperature;
+static plant_condition_t determine_plant_condition(const plant_profile_t *profile, const minute_data_t *latest_data) {
+    // データは引数で渡されるため、ここでのデータ取得は不要
+    float soil_moisture = latest_data->soil_moisture;
+    float temperature = latest_data->temperature;
 
     // 最優先：気温の限界チェック
     if (temperature >= profile->temp_high_limit) {
@@ -211,3 +212,4 @@ static plant_condition_t determine_plant_condition(const plant_profile_t *profil
     // 上記のいずれにも当てはまらない場合は、最後と同じ状態を維持
     return g_last_plant_condition;
 }
+
